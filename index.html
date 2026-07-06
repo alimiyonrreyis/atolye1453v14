@@ -58,7 +58,7 @@
       --overlay-rgb: 255, 255, 255;
       --card-border: rgba(255, 255, 255, 0.08);
       --shadow-color: rgba(0, 0, 0, 0.4);
-      --card-bg: rgba(13, 20, 51, 0.7);
+      --card-bg: rgba(13, 20, 51, 0.92);
       --input-bg: rgba(5, 8, 20, 0.8);
       --premium-card-bg: linear-gradient(135deg, rgba(15, 15, 25, 0.95), rgba(20, 10, 35, 0.95));
       --text-dim2: #334155;
@@ -142,8 +142,6 @@
 
     .glass-card {
       background: var(--card-bg);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
       border: 1px solid rgba(var(--accent-2-rgb), 0.18);
       border-radius: 16px;
       box-shadow: 0 8px 32px var(--shadow-color);
@@ -160,6 +158,85 @@
       background: rgba(var(--accent-2-rgb), 0.22) !important;
       border-color: var(--accent-2) !important;
       box-shadow: 0 0 0 1px var(--accent-2) inset;
+    }
+
+    /* Tartım Listesi / Formül Bileşenleri mobil kart tasarımı */
+    #weighing-cards,
+    #formul-bilesenleri-cards {
+      display: none;
+    }
+
+    .weigh-row {
+      padding: 12px 2px;
+      border-bottom: 1px solid rgba(var(--accent-2-rgb), 0.08);
+    }
+
+    .weigh-row:last-child {
+      border-bottom: none;
+    }
+
+    .weigh-row-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 8px;
+      font-size: 0.92rem;
+    }
+
+    .weigh-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .weigh-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 10px;
+      border-radius: 20px;
+      background: rgba(var(--accent-2-rgb), 0.1);
+      color: var(--text-secondary);
+      font-size: 0.72rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .weigh-chip-gold {
+      background: rgba(var(--gold-rgb), 0.15);
+      color: var(--gold);
+    }
+
+    .weigh-chip-muted {
+      background: transparent;
+      color: var(--text-muted);
+      padding-left: 2px;
+      font-weight: 500;
+    }
+
+    .weigh-total-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 2px;
+      border-top: 1px solid rgba(var(--accent-2-rgb), 0.08);
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+    }
+
+    .weigh-grand-total {
+      border-top: 2px solid rgba(var(--accent-2-rgb), 0.3);
+      margin-top: 4px;
+      padding-top: 12px;
+      font-weight: 800;
+      color: var(--text-primary);
+      font-size: 0.88rem;
+    }
+
+    .weigh-grand-total span:last-child {
+      color: var(--gold);
+      font-size: 1.05rem;
     }
 
     .nav-item {
@@ -510,8 +587,7 @@
     .modal-overlay {
       position: fixed;
       inset: 0;
-      background: rgba(0, 0, 0, 0.8);
-      backdrop-filter: blur(8px);
+      background: rgba(0, 0, 0, 0.88);
       z-index: 1000;
       display: flex;
       align-items: center;
@@ -775,6 +851,12 @@
       width: 100%;
       overflow-x: auto;
       -webkit-overflow-scrolling: touch;
+      /* iOS Safari: backdrop-filter'lı bir üst kart içinde yatay kaydırma
+         olduğunda oluşan hatalı dikey "katman" çizgisini önler */
+      transform: translateZ(0);
+      -webkit-transform: translateZ(0);
+      will-change: transform;
+      isolation: isolate;
     }
 
     #archive-cards,
@@ -996,6 +1078,18 @@
         display: flex;
         flex-direction: column;
         gap: 12px;
+      }
+
+      /* TARTIM LİSTESİ ve FORMÜL BİLEŞENLERİ: mobilde tablo yerine
+         gerçek, özenli kart listesi (aşağıda #weighing-cards / 
+         #formul-bilesenleri-cards olarak ayrıca render edilir) */
+      #weighing-table-wrap,
+      #formul-bilesenleri-table-wrap {
+        display: none;
+      }
+      #weighing-cards,
+      #formul-bilesenleri-cards {
+        display: block;
       }
 
       /* FAB: "Yeni Üretim" mobilde yüzen aksiyon butonuna dönüşür */
@@ -1703,7 +1797,7 @@
             <div style="font-weight:700;color:var(--gold);font-size:0.9rem;">📊 Tartım Listesi (m = V × ρ)</div>
             <div style="font-size:0.75rem;color:var(--text-faint);"></div>
           </div>
-          <div class="table-wrap"><table class="data-table">
+          <div class="table-wrap" id="weighing-table-wrap"><table class="data-table" id="weighing-table">
             <thead>
               <tr>
                 <th>Bileşen</th>
@@ -1722,6 +1816,7 @@
             </tbody>
             <tfoot id="weighing-foot"></tfoot>
           </table></div>
+          <div id="weighing-cards"></div>
         </div>
 
         <div style="display:flex;gap:12px;justify-content:flex-end;">
@@ -3464,6 +3559,41 @@
       </td>
       <td style="text-align:right;color:var(--gold);font-weight:800;font-size:1.05rem;padding:12px;">${cur}${fmtNum(grandTotal)}</td>
     </tr>`;
+
+      // Mobil kart görünümü (aynı veriden, .glass-card/chip tasarımıyla)
+      const cardsEl = document.getElementById('weighing-cards');
+      if (cardsEl) {
+        cardsEl.innerHTML = rows.map(r => `
+      <div class="weigh-row">
+        <div class="weigh-row-top">
+          <span style="${r.cls};font-weight:700;">${r.name}</span>
+          <span style="color:var(--gold);font-weight:700;">${cur}${r.cost}</span>
+        </div>
+        <div class="weigh-chips">
+          <span class="weigh-chip">${r.pct}%</span>
+          <span class="weigh-chip${isMlMaster ? ' weigh-chip-gold' : ''}">${r.ml} ml</span>
+          <span class="weigh-chip${!isMlMaster ? ' weigh-chip-gold' : ''}">${r.gr} gr</span>
+          <span class="weigh-chip weigh-chip-muted">ρ ${r.density}</span>
+          <span class="weigh-chip weigh-chip-muted">${cur}${r.price}/gr</span>
+        </div>
+      </div>`).join('') + `
+      <div class="weigh-total-row">
+        <span>Tek Şişe Sıvı <span style="opacity:0.55;">×${qty} → toplam</span></span>
+        <span style="color:var(--accent-2);font-weight:700;">${fmtNum(totalVol)} ml / ${fmtNum(totalGr)} gr</span>
+      </div>
+      <div class="weigh-total-row">
+        <span>Paketleme (${qty} şişe × ${cur}${fmtNum(packUnit)})</span>
+        <span style="color:var(--gold);font-weight:700;">${cur}${fmtNum(packTotal)}</span>
+      </div>
+      <div class="weigh-total-row">
+        <span>Toplam Sıvı Maliyeti (${qty} şişe)</span>
+        <span style="color:#2dd4bf;font-weight:700;">${cur}${fmtNum(liquidCostTotal)}</span>
+      </div>
+      <div class="weigh-total-row weigh-grand-total">
+        <span>GENEL TOPLAM — ${qty} Şişe</span>
+        <span>${cur}${fmtNum(grandTotal)}</span>
+      </div>`;
+      }
     }
 
     function calcMargins() {
@@ -4080,15 +4210,40 @@
 
     <!-- Formül Bileşenleri -->
     <div style="font-weight:700;color:var(--gold);font-size:0.85rem;margin-bottom:8px;">Formül Bileşenleri</div>
-    <div class="table-wrap"><table class="data-table">
+    ${(() => {
+      const fbRows = [];
+      (b.essences || []).forEach(e => fbRows.push({ name: e.name || 'Esans', pct: e.pct || 0, ml: fmtNum(e._vol || 0), gr: fmtNum(e._gr || 0), unit: fmtNum(e.pricePerGr || 0), cost: fmtNum((e._gr || 0) * (e.pricePerGr || 0)), color: '#f59e0b' }));
+      (b.additives || []).forEach(a => fbRows.push({ name: a.name || 'Katkı', pct: a.pct || 0, ml: fmtNum(a._vol || 0), gr: fmtNum(a._gr || 0), unit: fmtNum(a.pricePerGr || 0), cost: fmtNum((a._gr || 0) * (a.pricePerGr || 0)), color: '#2dd4bf' }));
+      fbRows.push({ name: 'Alkol', pct: (b.alcPct || 0).toFixed(1), ml: fmtNum(b.alcGr / (b.formula?.alcDensity || 0.789)), gr: fmtNum(b.alcGr), unit: fmtNum(b.formula?.alcPrice || 0), cost: fmtNum(b.alcGr * (b.formula?.alcPrice || 0)), color: 'var(--accent-2)' });
+      fbRows.push({ name: 'Saf Su', pct: (b.waterPct || 0).toFixed(1), ml: fmtNum(b.waterGr), gr: fmtNum(b.waterGr), unit: '—', cost: '0.00', color: '#60a5fa' });
+
+      const tableHtml = `
+    <div class="table-wrap" id="formul-bilesenleri-table-wrap"><table class="data-table" id="formul-bilesenleri-table">
       <thead><tr><th>Bileşen</th><th>%</th><th>ml</th><th>gr</th><th>₺/gr</th><th>Maliyet</th></tr></thead>
       <tbody>
-        ${(b.essences || []).map(e => `<tr><td style="color:#f59e0b;">${e.name || 'Esans'}</td><td>${e.pct || 0}%</td><td>${fmtNum(e._vol || 0)}</td><td>${fmtNum(e._gr || 0)}</td><td>${fmtNum(e.pricePerGr || 0)}</td><td style="color:var(--gold);">${cur}${fmtNum((e._gr || 0) * (e.pricePerGr || 0))}</td></tr>`).join('')}
-        ${(b.additives || []).map(a => `<tr><td style="color:#2dd4bf;">${a.name || 'Katkı'}</td><td>${a.pct || 0}%</td><td>${fmtNum(a._vol || 0)}</td><td>${fmtNum(a._gr || 0)}</td><td>${fmtNum(a.pricePerGr || 0)}</td><td style="color:var(--gold);">${cur}${fmtNum((a._gr || 0) * (a.pricePerGr || 0))}</td></tr>`).join('')}
-        <tr><td style="color:var(--accent-2);">Alkol</td><td>${(b.alcPct || 0).toFixed(1)}%</td><td>${fmtNum(b.alcGr / (b.formula?.alcDensity || 0.789))}</td><td>${fmtNum(b.alcGr)}</td><td>${fmtNum(b.formula?.alcPrice || 0)}</td><td style="color:var(--gold);">${cur}${fmtNum(b.alcGr * (b.formula?.alcPrice || 0))}</td></tr>
-        <tr><td style="color:#60a5fa;">Saf Su</td><td>${(b.waterPct || 0).toFixed(1)}%</td><td>${fmtNum(b.waterGr)}</td><td>${fmtNum(b.waterGr)}</td><td>—</td><td style="color:var(--gold);">₺0.00</td></tr>
+        ${fbRows.map(r => `<tr><td style="color:${r.color};">${r.name}</td><td>${r.pct}%</td><td>${r.ml}</td><td>${r.gr}</td><td>${r.unit}</td><td style="color:var(--gold);">${cur}${r.cost}</td></tr>`).join('')}
       </tbody>
     </table></div>`;
+
+      const cardsHtml = `
+    <div id="formul-bilesenleri-cards">
+      ${fbRows.map(r => `
+      <div class="weigh-row">
+        <div class="weigh-row-top">
+          <span style="font-weight:700;color:${r.color};">${r.name}</span>
+          <span style="font-weight:700;color:var(--gold);">${cur}${r.cost}</span>
+        </div>
+        <div class="weigh-chips">
+          <span class="weigh-chip">${r.pct}%</span>
+          <span class="weigh-chip">${r.ml} ml</span>
+          <span class="weigh-chip">${r.gr} gr</span>
+          <span class="weigh-chip weigh-chip-muted">${r.unit === '—' ? '—' : cur + r.unit + '/gr'}</span>
+        </div>
+      </div>`).join('')}
+    </div>`;
+
+      return tableHtml + cardsHtml;
+    })()}`;
       openModal('modal-batch');
     }
 
