@@ -23,7 +23,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Atölye 1453">
   <link rel="apple-touch-icon" href="icon-192.png">
-  <meta name="theme-color" content="var(--bg-page)">
+  <meta name="theme-color" content="#050814">
 
   <script>
     if ('serviceWorker' in navigator) {
@@ -2319,7 +2319,7 @@
 
         <div>
           <label class="lbl">Yoğunluk (g/ml) <span style="color:#ef4444;">*</span></label>
-          <input type="number" id="sm-density" class="inp" placeholder="0.95" step="0.001" value="0.95" />
+          <input type="number" id="sm-density" class="inp" placeholder="0.95" step="0.001" value="0.95" oninput="computeUnitPrice()" />
           <div class="density-hint">Alkol≈0.789 | Su=1.000 | Esans≈0.90–0.98</div>
         </div>
 
@@ -2769,7 +2769,6 @@
 
       // Fiyat kartları — kâr oranları gösterilmez, sadece fiyat
       const h      = costPerUnit > 0;
-      const wPrice = costPerUnit * (1 + wholePct  / 100);
       const wPriceQc = costPerUnit * (1 + wholePct  / 100);
       const rPrice = wPriceQc * (1 + retailPct / 100);
       const set = (id,v) => { const el=document.getElementById(id); if(el) el.textContent=v; };
@@ -3302,7 +3301,29 @@
     // ============================================================
     // MAIN DISPATCHER — routes to the correct engine
     // ============================================================
+    // Alkol/esans/katkı fiyatları stok seçimi anında satıra donduruluyordu;
+    // kur veya stok fiyatı sonradan değişirse bu satırlar bayat kalıyordu.
+    // Su zaten DB.stock'tan canlı okunuyor — diğerlerini de aynı şekilde tazeliyoruz.
+    function refreshLivePrices() {
+      const alcId = document.getElementById('f-alc-stock-select')?.value;
+      if (alcId) {
+        const alcItem = DB.stock.find(s => s.id === alcId);
+        if (alcItem) { const el = document.getElementById('f-alc-price'); if (el) el.value = alcItem.price || 0; }
+      }
+      essenceRows.forEach(r => {
+        if (!r.stockId) return;
+        const item = DB.stock.find(s => s.id === r.stockId);
+        if (item) { r.pricePerGr = item.price || 0; r.density = item.density || r.density || 0.95; }
+      });
+      additiveRows.forEach(r => {
+        if (!r.stockId) return;
+        const item = DB.stock.find(s => s.id === r.stockId);
+        if (item) { r.pricePerGr = item.price || 0; r.density = item.density || r.density || 1.0; }
+      });
+    }
+
     function calcFormula() {
+      refreshLivePrices();
       const inp = readSharedInputs();
       const alcPct = computeAlcPct(inp.waterPct);
 
@@ -3808,8 +3829,17 @@
     // ============================================================
     function genBatchNo() {
       const yr = new Date().getFullYear();
-      const count = (DB.batches.length + 1).toString().padStart(3, '0');
-      document.getElementById('f-batch').value = `BATCH-${yr}-${count}`;
+      const prefix = `BATCH-${yr}-`;
+      // Sadece kayıt sayısına değil, mevcut en yüksek numaraya bakılmalı;
+      // aksi halde bir kayıt silindiğinde yeni üretimde aynı seri no tekrar üretilebilir.
+      const existingNums = DB.batches
+        .map(b => b.batchNo)
+        .filter(no => no && no.startsWith(prefix))
+        .map(no => parseInt(no.slice(prefix.length), 10))
+        .filter(n => !isNaN(n));
+      const nextNum = (existingNums.length ? Math.max(...existingNums) : 0) + 1;
+      const count = nextNum.toString().padStart(3, '0');
+      document.getElementById('f-batch').value = `${prefix}${count}`;
     }
 
     // ============================================================
@@ -3862,6 +3892,10 @@
       if (!name) { toast('Parfüm adı giriniz', 'error'); return; }
       let batchNo = document.getElementById('f-batch').value.trim();
       if (!batchNo) { genBatchNo(); batchNo = document.getElementById('f-batch').value; }
+      if (DB.batches.some(b => b.batchNo === batchNo)) {
+        toast(`⚠️ "${batchNo}" seri numarası zaten kullanılıyor, farklı bir numara girin`, 'error', 6000);
+        return;
+      }
 
       const agingDays = DB.settings.agingDays || 30;
       const prodDate = new Date();
@@ -3900,7 +3934,30 @@
       const qty = parseInt(document.getElementById('f-qty').value) || 1;
       const packUnit = parseFloat(document.getElementById('f-packaging-cost').value) || 0;
       const packTotal = packUnit * qty;
-      const totalCost = liquidCost + packTotal;
+      // liquidCost şu ana kadar TEK ŞİŞE (per-unit) maliyetidir; toplam üretim için qty ile çarpılmalı.
+      const liquidCostTotal = liquidCost * qty;
+      const totalCost = liquidCostTotal + packTotal;
+
+      // ---- Stoktan düşülecek hammaddeleri topla (id bazında, tek şişe gram × qty) ----
+      const alcStockId = document.getElementById('f-alc-stock-select').value;
+      const usage = new Map(); // stockId -> toplam kullanılan gram
+      const addUsage = (stockId, gramsPerUnit) => {
+        if (!stockId || !gramsPerUnit) return;
+        usage.set(stockId, (usage.get(stockId) || 0) + gramsPerUnit * qty);
+      };
+      addUsage(alcStockId, alcGrN);
+      addUsage(waterStockId, waterGrN);
+      essenceRows.forEach(r => addUsage(r.stockId, r._gr || 0));
+      additiveRows.forEach(r => addUsage(r.stockId, r._gr || 0));
+
+      const stockWarnings = [];
+      for (const [stockId, gramsUsed] of usage) {
+        const item = DB.stock.find(s => s.id === stockId);
+        if (!item) continue;
+        item.stock = (item.stock || 0) - gramsUsed;
+        if (item.stock < 0) stockWarnings.push(`${item.name} (${fmtNum(Math.abs(item.stock))} gr açık)`);
+        await idbPut('stock', item);
+      }
 
       const batch = {
         id: 'BTH-' + Date.now(), batchNo, name,
@@ -3909,7 +3966,7 @@
         qty, totalVol: totalVolMl * qty, alcPct, waterPct,
         prodMode, calcUnit,
         prodDate: prodDate.toISOString(), readyDate: readyDate.toISOString(), agingDays,
-        formula: buildFormulaObj(), liquidCost, packagingCost: packTotal, totalCost,
+        formula: buildFormulaObj(), liquidCost: liquidCostTotal, packagingCost: packTotal, totalCost,
         longevity: parseFloat(document.getElementById('f-longevity')?.value) || 0,
         sillage:   parseFloat(document.getElementById('f-sillage')?.value)   || 0,
         rating:    parseFloat(document.getElementById('f-rating')?.value)    || 0,
@@ -3917,13 +3974,17 @@
         retailPrice: window._computedRetailPrice || 0,
         dealerMargin: parseFloat(document.getElementById('f-dealer-margin')?.value) || 100,
         retailMargin: parseFloat(document.getElementById('f-retail-margin')?.value) || 200,
-        alcGr: alcGrN, waterGr: waterGrN,
+        alcGr: alcGrN, waterGr: waterGrN, alcStockId, waterStockId,
         essences: JSON.parse(JSON.stringify(essenceRows)),
         additives: JSON.parse(JSON.stringify(additiveRows)),
       };
 
       DB.batches.unshift(batch);
       await idbPut('batches', batch);
+      renderStock();
+      if (stockWarnings.length) {
+        toast(`⚠️ Stok yetersiz: ${stockWarnings.join(', ')}`, 'error', 7000);
+      }
       toast(`✅ Üretim başarıyla kaydedildi — ${batchNo}`, 'success', 5000);
       showSection('archive');
     }
@@ -4136,7 +4197,9 @@
       const now   = new Date();
       const ready = new Date(b.readyDate) <= now;
       const cur   = DB.settings.currency || '₺';
-      const cost  = b.totalCost || 0;
+      const qty   = b.qty || 1;
+      const totalCost = b.totalCost || 0;
+      const cost  = totalCost / qty; // birim (tek şişe) maliyet — kâr oranları hep birim üzerinden hesaplanır
 
       // Kayıtlı kâr oranları (yoksa batch'teki fiyattan geri hesapla)
       const savedDealerPct = b.dealerMarginPct != null ? b.dealerMarginPct
@@ -4159,18 +4222,24 @@
     <!-- MALİYET — readonly, değiştirilemez -->
     <div style="background:rgba(var(--accent-2-rgb),0.06);border:1px solid rgba(var(--accent-2-rgb),0.2);border-radius:12px;padding:14px;margin-bottom:14px;">
       <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted);margin-bottom:10px;">🔒 Maliyet (Değiştirilemez)</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;text-align:center;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;text-align:center;margin-bottom:10px;">
         <div>
-          <div style="font-size:0.62rem;color:var(--text-faint);margin-bottom:3px;">Sıvı Maliyeti</div>
+          <div style="font-size:0.62rem;color:var(--text-faint);margin-bottom:3px;">Sıvı Maliyeti (Toplam)</div>
           <div style="font-weight:700;color:var(--accent-2);font-size:1rem;">${cur}${fmtNum(b.liquidCost || 0)}</div>
         </div>
         <div>
-          <div style="font-size:0.62rem;color:var(--text-faint);margin-bottom:3px;">Paketleme</div>
+          <div style="font-size:0.62rem;color:var(--text-faint);margin-bottom:3px;">Paketleme (Toplam)</div>
           <div style="font-weight:700;color:var(--text-muted);font-size:1rem;">${cur}${fmtNum(b.packagingCost || 0)}</div>
         </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;text-align:center;border-top:1px solid rgba(var(--accent-2-rgb),0.15);padding-top:10px;">
         <div>
-          <div style="font-size:0.62rem;color:var(--text-faint);margin-bottom:3px;">Toplam Maliyet</div>
-          <div style="font-weight:700;color:var(--gold);font-size:1rem;">${cur}${fmtNum(cost)}</div>
+          <div style="font-size:0.62rem;color:var(--text-faint);margin-bottom:3px;">TOPLAM Maliyet (${qty} şişe)</div>
+          <div style="font-weight:700;color:var(--gold);font-size:1rem;">${cur}${fmtNum(totalCost)}</div>
+        </div>
+        <div>
+          <div style="font-size:0.62rem;color:var(--text-faint);margin-bottom:3px;">Birim Maliyet (1 şişe)</div>
+          <div style="font-weight:700;color:var(--gold);font-size:1.05rem;">${cur}${fmtNum(cost)}</div>
         </div>
       </div>
     </div>
@@ -4251,7 +4320,7 @@
     function recalcDetailPrices() {
       const b = DB.batches.find(x => x.id === currentBatchId);
       if (!b) return;
-      const cost    = b.totalCost || 0;
+      const cost    = (b.totalCost || 0) / (b.qty || 1); // tek şişe maliyeti
       const dPct    = parseFloat(document.getElementById('detail-dealer-pct')?.value)  || 0;
       const rPct    = parseFloat(document.getElementById('detail-retail-pct')?.value)  || 0;
       const cur     = DB.settings.currency || '₺';
@@ -4271,7 +4340,7 @@
     async function saveDetailMargins() {
       const b = DB.batches.find(x => x.id === currentBatchId);
       if (!b) return;
-      const cost  = b.totalCost || 0;
+      const cost  = (b.totalCost || 0) / (b.qty || 1); // tek şişe maliyeti
       const dPct  = parseFloat(document.getElementById('detail-dealer-pct')?.value)  || 0;
       const rPct  = parseFloat(document.getElementById('detail-retail-pct')?.value)  || 0;
       b.dealerMarginPct = dPct;
@@ -4284,12 +4353,30 @@
     }
 
     async function deleteBatch(id) {
-      if (!confirm('Bu üretim kaydını silmek istediğinizden emin misiniz?')) return;
+      if (!confirm('Bu üretim kaydını silmek istediğinizden emin misiniz? Kullanılan hammaddeler stoğa geri eklenecektir.')) return;
+      const b = DB.batches.find(x => x.id === id);
+      if (b) {
+        const qty = b.qty || 1;
+        const restore = new Map();
+        const addRestore = (stockId, gramsPerUnit) => {
+          if (!stockId || !gramsPerUnit) return;
+          restore.set(stockId, (restore.get(stockId) || 0) + gramsPerUnit * qty);
+        };
+        addRestore(b.alcStockId, b.alcGr || 0);
+        addRestore(b.waterStockId, b.waterGr || 0);
+        (b.essences || []).forEach(r => addRestore(r.stockId, r._gr || 0));
+        (b.additives || []).forEach(r => addRestore(r.stockId, r._gr || 0));
+        for (const [stockId, grams] of restore) {
+          const item = DB.stock.find(s => s.id === stockId);
+          if (item) { item.stock = (item.stock || 0) + grams; await idbPut('stock', item); }
+        }
+        renderStock();
+      }
       DB.batches = DB.batches.filter(b => b.id !== id);
       await idbDelete('batches', id);
       selectedBatchIds.delete(id);
       renderArchive();
-      toast('Kayıt silindi', 'info');
+      toast('Kayıt silindi, hammaddeler stoğa geri eklendi', 'info');
     }
 
     // ============================================================
@@ -4381,6 +4468,7 @@
       const totalQty = parseFloat(document.getElementById('sm-total-qty').value) || 0;
       const currency = document.getElementById('sm-currency').value;
       const qtyUnit = document.getElementById('sm-qty-unit').value;
+      const density = parseFloat(document.getElementById('sm-density').value) || 1;
       const rates = DB.settings.rates || { USD: 35, EUR: 38, GBP: 45 };
 
       let priceInTL = totalPrice;
@@ -4388,10 +4476,10 @@
       else if (currency === 'EUR') priceInTL = totalPrice * (rates.EUR || 38);
       else if (currency === 'GBP') priceInTL = totalPrice * (rates.GBP || 45);
 
-      // Convert quantity to grams
+      // Hacim birimlerini yoğunluk kullanarak grama çevir (m = V × yoğunluk)
       let qtyInGrams = totalQty;
-      if (qtyUnit === 'litre') qtyInGrams = totalQty * 1000;
-      else if (qtyUnit === 'ml') qtyInGrams = totalQty; // approximate; user should set density
+      if (qtyUnit === 'litre') qtyInGrams = totalQty * 1000 * density;
+      else if (qtyUnit === 'ml') qtyInGrams = totalQty * density;
 
       let pricePerGr = 0;
       if (qtyInGrams > 0) pricePerGr = priceInTL / qtyInGrams;
@@ -4444,12 +4532,19 @@
 
       const pricePerGr = computeUnitPrice();
 
+      // Kur güncellemesinin çalışabilmesi için dövizli birim fiyatı da (TL'ye çevrilmeden önceki hali) sakla
+      let qtyInGrams = totalQty;
+      if (document.getElementById('sm-qty-unit').value === 'litre') qtyInGrams = totalQty * 1000 * density;
+      else if (document.getElementById('sm-qty-unit').value === 'ml') qtyInGrams = totalQty * density;
+      const originalPrice = qtyInGrams > 0 ? (totalPrice / qtyInGrams) : 0;
+
       const item = {
         id: id || 'STK-' + Date.now(),
         name, type: document.getElementById('sm-type').value,
         density, stock,
         min: parseFloat(document.getElementById('sm-min').value) || 50,
         price: pricePerGr,
+        originalPrice,
         totalPrice, totalQty,
         currency: document.getElementById('sm-currency').value,
         qtyUnit: document.getElementById('sm-qty-unit').value,
@@ -4462,6 +4557,7 @@
       closeModal('modal-stock');
       renderStock();
       refreshStockDropdowns();
+      calcFormula();
       toast(`✅ "${name}" başarıyla kaydedildi! Birim maliyet: ₺${fmtNum(pricePerGr, 4)}/gr`, 'success', 5000);
     }
 
@@ -4592,6 +4688,9 @@
       });
       const icon = document.getElementById('sidebar-theme-icon');
       if (icon) icon.textContent = theme === 'dark' ? '🌙' : '☀️';
+      // Mobil tarayıcı adres çubuğu rengini de temayla senkron tut
+      const metaTheme = document.querySelector('meta[name="theme-color"]');
+      if (metaTheme) metaTheme.setAttribute('content', theme === 'light' ? '#f3f4f9' : '#050814');
     }
 
     function applyStoredTheme() {
@@ -4706,6 +4805,9 @@
           if (imp.company) { DB.company = Object.assign({}, DB.company, imp.company); await saveCompany_idb(); }
           toast('✅ Yedek başarıyla yüklendi!', 'success', 5000);
           renderDashboard();
+          renderArchive();
+          renderStock();
+          renderFormulas();
           refreshStockDropdowns();
         } catch (err) {
           toast('Yedek dosyası geçersiz: ' + err.message, 'error');
@@ -4740,9 +4842,8 @@
     }
 
     function executePDF(type) {
-      // PDF batch'in kayıtlı dealerMarginPct/retailMarginPct kullanır
-      window._pdfDealerMargin = null;
-      window._pdfRetailMargin = null;
+      // PDF, batch üzerinde kayıtlı dealerMarginPct/retailMarginPct değerlerini kullanır
+      // (bkz. saveDetailMargins) — bu modalda ek bir override yapılmaz.
       closeModal('modal-pdf-type');
       if (_pdfMode === 'bulk') {
         exportBulkPDF(type);
@@ -4751,32 +4852,6 @@
         else if (type === 'B') exportPDF_B(currentBatchId);
         else exportPDF_C(currentBatchId);
       }
-    }
-
-    function recalcPdfPrices() {
-      const previewEl = document.getElementById('pdf-price-preview');
-      if (!previewEl || !currentBatchId) return;
-      const b = DB.batches.find(x => x.id === currentBatchId);
-      if (!b) return;
-      const cost    = b.totalCost || 0;
-      const dMargin = parseFloat(document.getElementById('pdf-dealer-margin')?.value) || 0;
-      const rMargin = parseFloat(document.getElementById('pdf-retail-margin')?.value) || 0;
-      const dPrice  = cost * (1 + dMargin / 100);
-      const rPrice  = dPrice * (1 + rMargin / 100);
-      const cur     = DB.settings.currency || '₺';
-      previewEl.innerHTML = `
-        <div style="background:rgba(var(--overlay-rgb),0.03);border-radius:8px;padding:8px;">
-          <div style="font-size:0.58rem;color:var(--text-faint);margin-bottom:3px;">MALİYET</div>
-          <div style="font-weight:700;color:var(--text-secondary);font-size:0.9rem;">${cur}${fmtNum(cost)}</div>
-        </div>
-        <div style="background:rgba(var(--accent-2-rgb),0.08);border-radius:8px;padding:8px;">
-          <div style="font-size:0.58rem;color:var(--accent-2);margin-bottom:3px;">TOPTAN</div>
-          <div style="font-weight:700;color:#c084fc;font-size:0.9rem;">${cur}${fmtNum(dPrice)}</div>
-        </div>
-        <div style="background:rgba(var(--gold-rgb),0.06);border-radius:8px;padding:8px;">
-          <div style="font-size:0.58rem;color:var(--gold);margin-bottom:3px;">PERAKENDE</div>
-          <div style="font-weight:700;color:#fde68a;font-size:0.9rem;">${cur}${fmtNum(rPrice)}</div>
-        </div>`;
     }
 
     // ---- Shared PDF helpers (white/light professional theme) ----
@@ -4877,6 +4952,10 @@
       const batches = id ? [DB.batches.find(x => x.id === id)].filter(Boolean)
         : DB.batches.filter(b => selectedBatchIds.has(b.id));
       if (!batches.length) { toast('Kayıt bulunamadı', 'error'); return; }
+      if (!window.jspdf) {
+        toast('⚠️ PDF kütüphanesi yüklenemedi. İnternet bağlantınızı kontrol edip tekrar deneyin.', 'error', 6000);
+        return;
+      }
       const { jsPDF } = window.jspdf;
       const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
       const theme = pdfLightTheme([80, 40, 160]);
@@ -4888,13 +4967,16 @@
       doc.text('MALIYET OZETI - Tum Urunler', 10, y); y += 5;
 
       const rows = batches.map(b => {
-        const _dp = b.dealerPrice || (b.totalCost||0) * (1 + (b.dealerMarginPct||80)/100);
+        const qty = b.qty || 1;
+        const costPerUnit = (b.totalCost || 0) / qty;
+        const _dp = b.dealerPrice || costPerUnit * (1 + (b.dealerMarginPct||80)/100);
         const _rp = b.retailPrice || _dp * (1 + (b.retailMarginPct||220)/100);
         return [
           tr(b.name || '—'),
-          tr(b.category || '—') + ' ' + (b.bottleSize || 50) + 'ml',
+          tr(b.category || '—') + ' ' + (b.bottleSize || 50) + 'ml x' + qty,
           ((b.essences || []).reduce((s, e) => s + (e.pct || 0), 0)).toFixed(1) + '%',
           'TL ' + fmtNum(b.totalCost || 0),
+          'TL ' + fmtNum(costPerUnit),
           'TL ' + fmtNum(_dp),
           'TL ' + fmtNum(_rp),
         ];
@@ -4902,16 +4984,17 @@
 
       doc.autoTable({
         startY: y,
-        head: [['Parfum Adi', 'Kategori / Boyut', 'Esans Orani', 'Toplam Maliyet', 'Bayi Fiyati', 'Perakende']],
+        head: [['Parfum Adi', 'Kategori / Boyut', 'Esans Orani', 'Toplam Maliyet', 'Birim Maliyet', 'Bayi Fiyati', 'Perakende']],
         body: rows,
         ...theme,
         columnStyles: {
-          0: { fontStyle: 'bold', cellWidth: 44 },
-          1: { cellWidth: 36 },
-          2: { cellWidth: 22, halign: 'center' },
-          3: { cellWidth: 28, halign: 'right', textColor: [120, 40, 40] },
-          4: { cellWidth: 28, halign: 'right', textColor: [40, 100, 40], fontStyle: 'bold' },
-          5: { cellWidth: 28, halign: 'right', textColor: [40, 60, 160], fontStyle: 'bold' },
+          0: { fontStyle: 'bold', cellWidth: 38 },
+          1: { cellWidth: 28 },
+          2: { cellWidth: 16, halign: 'center' },
+          3: { cellWidth: 26, halign: 'right', textColor: [120, 40, 40] },
+          4: { cellWidth: 24, halign: 'right', textColor: [120, 40, 40], fontStyle: 'bold' },
+          5: { cellWidth: 26, halign: 'right', textColor: [40, 100, 40], fontStyle: 'bold' },
+          6: { cellWidth: 26, halign: 'right', textColor: [40, 60, 160], fontStyle: 'bold' },
         },
         didDrawPage: () => {
           doc.setFillColor(...PDF_ACCENT); doc.rect(0, 0, 4, 297, 'F');
@@ -4967,16 +5050,19 @@
         doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...PDF_ACCENT);
         doc.text('TICARI OZET', 10, dy); dy += 4;
         // Batch'in kayıtlı kâr oranlarını kullan
-        const pdfDealerPrice = b.dealerPrice || (b.totalCost||0) * (1 + (b.dealerMarginPct||80)/100);
+        const qty = b.qty || 1;
+        const costPerUnit = (b.totalCost || 0) / qty;
+        const pdfDealerPrice = b.dealerPrice || costPerUnit * (1 + (b.dealerMarginPct||80)/100);
         const pdfRetailPrice = b.retailPrice || pdfDealerPrice * (1 + (b.retailMarginPct||220)/100);
-        const profit = pdfDealerPrice - (b.totalCost || 0);
+        const profit = pdfDealerPrice - costPerUnit;
         const marg = (b.dealerPrice || 0) > 0 ? (profit / (b.dealerPrice || 1) * 100) : 0;
         doc.autoTable({
           startY: dy, ...theme,
           body: [
-            ['Sivi Maliyeti', 'TL ' + fmtNum(b.liquidCost || 0), 'Bayi Fiyati', 'TL ' + fmtNum(b.dealerPrice || 0)],
-            ['Paketleme', 'TL ' + fmtNum(b.packagingCost || 0), 'Perakende', 'TL ' + fmtNum(b.retailPrice || 0)],
-            ['TOPLAM Maliyet', 'TL ' + fmtNum(b.totalCost || 0), 'Net Kar', 'TL ' + fmtNum(profit) + ' (%' + fmtNum(marg) + ')'],
+            ['TOPLAM Maliyet (' + qty + ' sise)', 'TL ' + fmtNum(b.totalCost || 0), 'Birim Maliyet (1 sise)', 'TL ' + fmtNum(costPerUnit)],
+            ['Sivi Maliyeti (Toplam)', 'TL ' + fmtNum(b.liquidCost || 0), 'Paketleme (Toplam)', 'TL ' + fmtNum(b.packagingCost || 0)],
+            ['Bayi Fiyati (Birim)', 'TL ' + fmtNum(b.dealerPrice || 0), 'Perakende (Birim)', 'TL ' + fmtNum(b.retailPrice || 0)],
+            ['Net Kar (Birim)', 'TL ' + fmtNum(profit) + ' (%' + fmtNum(marg) + ')', '', ''],
         ...(b.longevity||b.sillage||b.rating ? [
           ['Kalıcılık', (b.longevity||0) + '/10', 'Yayılım (Sillage)', (b.sillage||0) + '/10'],
           ['Genel Beğeni', (b.rating||0) + '/10', '', ''],
@@ -5007,6 +5093,10 @@
       const batches = id ? [DB.batches.find(x => x.id === id)].filter(Boolean)
         : DB.batches.filter(b => selectedBatchIds.has(b.id));
       if (!batches.length) { toast('Kayit bulunamadi', 'error'); return; }
+      if (!window.jspdf) {
+        toast('⚠️ PDF kütüphanesi yüklenemedi. İnternet bağlantınızı kontrol edip tekrar deneyin.', 'error', 6000);
+        return;
+      }
       const { jsPDF } = window.jspdf;
       const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
       const ACC = [30, 100, 160];
@@ -5018,7 +5108,7 @@
       doc.text('BAYI FIYAT LISTESI - ' + new Date().toLocaleDateString('tr-TR'), 10, y); y += 5;
 
       const rows = batches.map(b => {
-        const cost   = b.totalCost || 0;
+        const cost   = (b.totalCost || 0) / (b.qty || 1);
         const dPrice = b.dealerPrice || cost * (1 + (b.dealerMarginPct||80)/100);
         const rPrice = b.retailPrice || dPrice * (1 + (b.retailMarginPct||220)/100);
         const scores = [];
@@ -5067,6 +5157,10 @@
       const batches = id ? [DB.batches.find(x => x.id === id)].filter(Boolean)
         : DB.batches.filter(b => selectedBatchIds.has(b.id));
       if (!batches.length) { toast('Kayit bulunamadi', 'error'); return; }
+      if (!window.jspdf) {
+        toast('⚠️ PDF kütüphanesi yüklenemedi. İnternet bağlantınızı kontrol edip tekrar deneyin.', 'error', 6000);
+        return;
+      }
       const { jsPDF } = window.jspdf;
       const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
       const ACC = [20, 130, 100];
@@ -5078,7 +5172,8 @@
       doc.text('Parfum Koleksiyonu - Satis Fiyat Listesi', 10, y); y += 5;
 
       const rows = batches.map((b, i) => {
-        const cost   = b.totalCost || 0;
+        const cost   = (b.totalCost || 0) / (b.qty || 1);
+        const dPrice = b.dealerPrice || cost * (1 + (b.dealerMarginPct||80)/100);
         const rPrice = b.retailPrice || dPrice * (1 + (b.retailMarginPct||220)/100);
         const scores = [];
         if (b.longevity) scores.push('Kalicilik: ' + b.longevity + '/10');
